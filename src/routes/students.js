@@ -82,6 +82,52 @@ router.get("/my-students", authorize("teacher","admin","principal"), async (req,
   }
 });
 
+// ─── GET /api/students/search — fast search for dropdown picker ───────────────
+router.get("/search", async (req, res) => {
+  try {
+    const { q, form } = req.query;
+    if (!q || q.trim().length < 1) return res.json({ students: [] });
+
+    const campus = req.campus;
+    const conditions = ["s.campus = $1", "s.status = 'Active'"];
+    const params = [campus];
+    let i = 2;
+
+    // Teacher scoping
+    if (req.user.role === "teacher") {
+      const formsRes = await pool.query(
+        `SELECT DISTINCT form FROM teacher_subjects WHERE teacher_user_id = $1 AND campus = $2`,
+        [req.user.id, campus]
+      );
+      const forms = formsRes.rows.map(r => r.form);
+      if (!forms.length) return res.json({ students: [] });
+      const ph = forms.map((_, idx) => `$${i + idx}`).join(",");
+      conditions.push(`s.form IN (${ph})`);
+      params.push(...forms);
+      i += forms.length;
+    }
+
+    if (form) { conditions.push(`s.form = $${i++}`); params.push(form); }
+
+    conditions.push(
+      `(s.first_name ILIKE $${i} OR s.last_name ILIKE $${i} OR s.student_id ILIKE $${i} OR CONCAT(s.last_name,' ',s.first_name) ILIKE $${i} OR CONCAT(s.first_name,' ',s.last_name) ILIKE $${i})`
+    );
+    params.push(`%${q.trim()}%`); i++;
+
+    const result = await pool.query(
+      `SELECT s.id, s.student_id, s.first_name, s.last_name, s.form AS grade, s.form, s.class
+       FROM students s
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY s.last_name, s.first_name
+       LIMIT 15`,
+      params
+    );
+    res.json({ students: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── GET /api/students ────────────────────────────────────────────────────────
 router.get("/", async (req, res) => {
   try {
