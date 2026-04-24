@@ -140,10 +140,18 @@ router.get("/subjects/all", async (req, res) => {
 // ─── POST /api/results ────────────────────────────────────────────────────────
 router.post("/", authorize("admin","teacher","principal"), async (req, res) => {
   try {
-    const {
-      studentId, subjectId, term, year, report_type = "term_report",
-      mark, caScore, effort, class_average, remarks,
-    } = req.body;
+    const body = req.body;
+    // Accept both camelCase (studentId) and snake_case (student_id)
+    const studentId    = body.studentId    || body.student_id;
+    const subjectId    = body.subjectId    || body.subject_id;
+    const term         = body.term;
+    const year         = body.year;
+    const report_type  = body.report_type  || "term_report";
+    const mark         = body.mark;
+    const caScore      = body.caScore;
+    const effort       = body.effort;
+    const class_average= body.class_average;
+    const remarks      = body.remarks;
 
     const finalMark = mark || caScore;
 
