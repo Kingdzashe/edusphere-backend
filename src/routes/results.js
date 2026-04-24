@@ -151,18 +151,31 @@ router.post("/", authorize("admin","teacher","principal"), async (req, res) => {
       return res.status(400).json({ error: "Student, subject, term and year are required." });
     }
 
-    // Teacher check — can only enter for their assigned classes
+    // Teacher check — verify they are assigned to this subject via teacher_subjects
     if (req.user.role === "teacher") {
       const student = await pool.query(`SELECT form FROM students WHERE id = $1`, [studentId]);
       if (!student.rows.length) return res.status(404).json({ error: "Student not found." });
+      const studentForm = student.rows[0].form;
 
-      const assigned = await pool.query(
-        `SELECT form FROM teacher_classes WHERE teacher_user_id = $1 AND campus = $2`,
-        [req.user.id, req.campus]
+      // Primary check: teacher_subjects table (explicit subject+form assignments)
+      const subjectAssigned = await pool.query(
+        `SELECT id FROM teacher_subjects
+         WHERE teacher_user_id = $1 AND subject_id = $2 AND form = $3 AND campus = $4`,
+        [req.user.id, subjectId, studentForm, req.campus]
       );
-      const forms = assigned.rows.map(r => r.form);
-      if (!forms.includes(student.rows[0].form)) {
-        return res.status(403).json({ error: "You can only enter results for your assigned classes." });
+
+      if (!subjectAssigned.rows.length) {
+        // Fallback: check timetable
+        const ttAssigned = await pool.query(
+          `SELECT id FROM timetable
+           WHERE teacher_user_id = $1 AND subject_id = $2 AND form = $3 AND campus = $4`,
+          [req.user.id, subjectId, studentForm, req.campus]
+        );
+        if (!ttAssigned.rows.length) {
+          return res.status(403).json({
+            error: "You are not assigned to teach this subject for this student's form. Please contact admin to update your subject assignments."
+          });
+        }
       }
     }
 
@@ -189,6 +202,104 @@ router.post("/", authorize("admin","teacher","principal"), async (req, res) => {
     );
 
     res.status(201).json({ result: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/results/student/:studentId ─────────────────────────────────────
+// Returns ALL results for a student, compiled by term and subject
+router.get("/student/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { report_type } = req.query;
+    const campus = req.campus;
+
+    // Teacher check — can only view results for students in their assigned forms
+    if (req.user.role === "teacher") {
+      const student = await pool.query(`SELECT form FROM students WHERE id = $1`, [studentId]);
+      if (!student.rows.length) return res.status(404).json({ error: "Student not found." });
+      const form = student.rows[0].form;
+
+      const assigned = await pool.query(
+        `SELECT id FROM teacher_subjects WHERE teacher_user_id = $1 AND form = $2 AND campus = $3`,
+        [req.user.id, form, campus]
+      );
+      if (!assigned.rows.length) {
+        return res.status(403).json({ error: "You are not assigned to teach any subject for this student's form." });
+      }
+    }
+
+    const conditions = ["r.student_id = $1", "s.campus = $2"];
+    const params = [studentId, campus];
+    let i = 3;
+
+    if (report_type) { conditions.push(`r.report_type = $${i++}`); params.push(report_type); }
+
+    const result = await pool.query(
+      `SELECT r.id, r.term, r.year, r.report_type, r.mark, r.effort,
+              r.class_average, r.grade, r.remarks, r.created_at,
+              sub.id AS subject_id, sub.name AS subject_name, sub.curriculum,
+              s.first_name, s.last_name, s.form AS student_grade, s.class
+       FROM results r
+       JOIN students s ON s.id = r.student_id
+       JOIN subjects sub ON sub.id = r.subject_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY r.year DESC, r.term, sub.name`,
+      params
+    );
+
+    res.json({ results: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/results/class/:form ────────────────────────────────────────────
+// Returns results for an entire form, grouped by student — for teacher class view
+router.get("/class/:form", async (req, res) => {
+  try {
+    const { form } = req.params;
+    const { term, year = new Date().getFullYear(), report_type = "term_report", subject_id } = req.query;
+    const campus = req.campus;
+
+    const conditions = ["s.form = $1", "s.campus = $2"];
+    const params = [form, campus];
+    let i = 3;
+
+    if (term)       { conditions.push(`r.term = $${i++}`);        params.push(term); }
+    if (year)       { conditions.push(`r.year = $${i++}`);        params.push(parseInt(year)); }
+    if (report_type){ conditions.push(`r.report_type = $${i++}`); params.push(report_type); }
+    if (subject_id) { conditions.push(`r.subject_id = $${i++}`);  params.push(subject_id); }
+
+    // Teacher — scope to their assigned subject
+    if (req.user.role === "teacher" && subject_id) {
+      const assigned = await pool.query(
+        `SELECT id FROM teacher_subjects WHERE teacher_user_id = $1 AND subject_id = $2 AND form = $3 AND campus = $4`,
+        [req.user.id, subject_id, form, campus]
+      );
+      if (!assigned.rows.length) {
+        return res.status(403).json({ error: "You are not assigned to this subject for this form." });
+      }
+    }
+
+    const result = await pool.query(
+      `SELECT r.id, r.term, r.year, r.report_type, r.mark, r.effort,
+              r.class_average, r.grade, r.remarks,
+              sub.id AS subject_id, sub.name AS subject_name, sub.curriculum,
+              s.id AS student_db_id, s.student_id, s.first_name, s.last_name,
+              s.form AS student_grade, s.class, s.gender
+       FROM results r
+       JOIN students s ON s.id = r.student_id
+       JOIN subjects sub ON sub.id = r.subject_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY s.last_name, s.first_name, sub.name`,
+      params
+    );
+
+    res.json({ results: result.rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
